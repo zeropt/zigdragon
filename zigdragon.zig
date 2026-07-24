@@ -10,32 +10,23 @@ const std = @import("std");
 const n_limit = 23; // Keeps the fractal below 10M folds
 const canvas_limit = 16777216; // limit the drawing size
 const help_message =
-    \\Usage: zigdragon [-rSD] [-n <iteration>]...
+    \\Usage: zigdragon [-mfD] [-n <iteration>]...
     \\
     \\zigdragon is a Heighway curve generator.
     \\
     \\Options:
-    \\  -r, --right               Generate a right folding curve instead of left
-    \\  -S, --sequence            Output the sequence of folds
-    \\  -D, --draw                Draw the fractal (drawn by default)
-    \\  -n <iteration>            Number of iterations the pattern is folded
-    \\                            (default: 10)
-    \\  -x, --scale <len>         Segment length between each fold (default: 1)
-    \\  -b, --brush <char>        Ascii character to draw with (default: 'o')
-    \\  -s, --start <direction>   Cardinal direction to start the curve with
-    \\                            e.g. N, S, E, W (default: S)
-    \\  -h, --help                Show help
+    \\  -m, --mirror                Generate a right instead of left-handed curve
+    \\  -f, --folds                 Output the sequence of folds
+    \\  -D, --draw                  Draw the fractal (drawn by default)
+    \\  -n <iteration>              Number of iterations the pattern is folded
+    \\                              (default: 10)
+    \\  -x, --scale <len>           Segment length between each fold (default: 1)
+    \\  -b, --brush <char>          Ascii character to draw with (default: 'o')
+    \\  -d, --direction <heading>   Cardinal direction to start the curve with
+    \\                              e.g. N, S, E, W (default: S)
+    \\  -h, --help                  Show help
     \\
 ;
-
-const Fold = enum(u1) {
-    left,
-    right,
-
-    fn reversed(self: @This()) @This() {
-        return @enumFromInt(~@intFromEnum(self));
-    }
-};
 
 const Cardinal = enum(u2) {
     east,
@@ -52,136 +43,191 @@ const Cardinal = enum(u2) {
     }
 };
 
-const ArgsError = error { InvalidArgument };
-
-const DragonParameters = struct {
-    right: bool = false,
-    sequence: bool = false,
-    draw: bool = true,
-    n: u32 = 10,
-    scale: u32 = 1,
-    brush: u8 = 'o',
-    start: Cardinal = .south,
-    help: bool = false,
+// Command line options
+// The name of each field is a template to compare with
+// Single character names are for flags
+const Arguments = struct {
+    @"m --mirror": bool = false,
+    @"f --folds": bool = false,
+    @"D --draw": bool = false,
+    @"-n": u32 = 10,
+    @"-x --scale": u32 = 1,
+    @"-b --brush": u8 = 'o',
+    @"-d --direction": Cardinal = .south,
+    @"-h --help": bool = false,
 };
 
-fn parseArgsSlice(args: []const [:0]const u8) ArgsError!DragonParameters {
-    var params: DragonParameters = .{};
-    var force_draw: bool = false;
+// Checks if the arg string is in the template string
+// Ignores patterns of length 1 since those are flags
+fn argInTemplate(arg: []const u8, comptime template: []const u8) bool {
+    if (template.len < 2) return false;
+
+    var matches: bool = true;
+    var i: usize = 0;
+    for (template) |c| switch (c) {
+        ' ', ',', '/', '|' => {
+            if (matches) break;
+            matches = true;
+            i = 0;
+        },
+        else => {
+            if (!matches) continue;
+            if (i >= arg.len) {
+                matches = false;
+                continue;
+            }
+            if (c != arg[i]) matches = false;
+            i += 1;
+        }
+    };
+    if (i == 1 or i < arg.len) matches = false;
+
+    return matches;
+}
+
+// Checks if the flag is in the template string
+fn flagInTemplate(flag: u8, comptime template: []const u8) bool {
+    if (template.len == 0) return false;
+
+    var first_character: bool = true;
+    var matches: bool = false;
+    for (template) |c| switch (c) {
+        ' ', ',', '/', '|' => {
+            if (matches) break;
+            first_character = true;
+            matches = false;
+        },
+        else => {
+            if (first_character) {
+                if (c == flag) matches = true;
+                first_character = false;
+            } else matches = false;
+        }
+    };
+
+    return matches;
+}
+
+test "argInTemplate, flagInTemplate functions" {
+    try std.testing.expect(argInTemplate("-n", "-n"));
+    try std.testing.expect(!argInTemplate("n", "-n"));
+
+    try std.testing.expect(argInTemplate("-x", "-x --scale"));
+    try std.testing.expect(argInTemplate("--scale", "-x --scale"));
+    try std.testing.expect(!argInTemplate("--x", "-x --scale"));
+
+    try std.testing.expect(!argInTemplate("r", "r --right"));
+
+    try std.testing.expect(flagInTemplate('r', "r --right"));
+    try std.testing.expect(flagInTemplate('r', "--right r"));
+    try std.testing.expect(!flagInTemplate('n', "--right r"));
+    try std.testing.expect(!flagInTemplate('r', "--right rar"));
+}
+
+const ArgsError = error { InvalidArgument };
+
+fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
+    var results: Arguments = .{};
 
     // Loop through and parse each argument
+    const templates = @typeInfo(Arguments).@"struct".fields;
     var args_i: usize = 0;
-    while (args_i < args.len) : (args_i += 1) {
+    argloop: while (args_i < args.len) : (args_i += 1) {
         const arg = args[args_i];
-        const eql = std.mem.eql;
-        const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
 
-        // Longname flags: --right, --sequence, --draw
-        if (eql(u8, arg, "--right")) {
-            params.right = true;
-        } else if (eql(u8, arg, "--sequence")) {
-            params.sequence = true;
-            if (!force_draw) params.draw = false;
-        } else if (eql(u8, arg, "--draw")) {
-            params.draw = true;
-            force_draw = true;
+        // Handle args that match templates
+        inline for (templates) |field| {
+            if (argInTemplate(arg, field.name)) {
+                // Bools simply get set to true
+                if (field.type == bool) {
+                    @field(results, field.name) = true;
+                    continue :argloop;
+                }
 
-        // Option: -n <iteration>
-        } else if (eql(u8, arg, "-n")) {
-            args_i += 1;
-            if (args_i >= args.len) {
-                std.log.err("missing value for {s}", .{arg});
-                return ArgsError.InvalidArgument;
-            }
-            const val = args[args_i];
-            params.n = std.fmt.parseInt(u32, val, 10) catch {
-                std.log.err("invalid value {s} '{s}'", .{arg, val});
-                return ArgsError.InvalidArgument;
-            };
+                // Other types read the following argument as the parameter
+                args_i += 1;
+                if (args_i >= args.len) {
+                    std.log.err("missing value for {s}", .{arg});
+                    return ArgsError.InvalidArgument;
+                }
+                const val = args[args_i];
 
-        // Option: -x, --scale <len>
-        } else if (eql(u8, arg, "-x") or eql(u8, arg, "--scale")) {
-            args_i += 1;
-            if (args_i >= args.len) {
-                std.log.err("missing value for {s}", .{arg});
-                return ArgsError.InvalidArgument;
-            }
-            const val = args[args_i];
-            params.scale = std.fmt.parseInt(u32, val, 10) catch {
-                std.log.err("invalid value {s} '{s}'", .{arg, val});
-                return ArgsError.InvalidArgument;
-            };
-
-        // Option: -b, --brush <char>
-        } else if (eql(u8, arg, "-b") or eql(u8, arg, "--brush")) {
-            args_i += 1;
-            if (args_i >= args.len) {
-                std.log.err("missing value for {s}", .{arg});
-                return ArgsError.InvalidArgument;
-            }
-            const val = args[args_i];
-            if (val.len == 1) {
-                params.brush = val[0];
-            } else {
-                std.log.err("invalid value {s} '{s}'", .{arg, val});
-                return ArgsError.InvalidArgument;
-            }
-
-        // Option: -s, --start <direction>
-        } else if (eql(u8, arg, "-s") or eql(u8, arg, "--start")) {
-            args_i += 1;
-            if (args_i >= args.len) {
-                std.log.err("missing value for {s}", .{arg});
-                return ArgsError.InvalidArgument;
-            }
-            const val = args[args_i];
-            if (eqlIgnoreCase(val, "w") or eqlIgnoreCase(val, "west")) {
-                params.start = .west;
-            } else if (eqlIgnoreCase(val, "e") or eqlIgnoreCase(val, "east")) {
-                params.start = .east;
-            } else if (eqlIgnoreCase(val, "n") or eqlIgnoreCase(val, "north")) {
-                params.start = .north;
-            } else if (eqlIgnoreCase(val, "s") or eqlIgnoreCase(val, "south")) {
-                params.start = .south;
-            } else {
-                std.log.err("invalid value {s} '{s}'", .{arg, val});
-                return ArgsError.InvalidArgument;
-            }
-
-        // Option: -h, --help
-        } else if (eql(u8, arg, "-h") or eql(u8, arg, "--help")) {
-            params.help = true;
-
-        } else if (arg.len >= 2) {
-            if (arg[0] == '-' and !eql(u8, arg[0..2], "--")) {
-                // Shortname flags: -rSD
-                for (arg[1..]) |flag| switch (flag) {
-                    'r' => params.right = true,
-                    'S' => {
-                        params.sequence = true;
-                        if (!force_draw) params.draw = false;
-                    },
-                    'D' => {
-                        params.draw = true;
-                        force_draw = true;
+                // Currently implemented parameter types:
+                // u8, u32, i32, Cardinal
+                @field(results, field.name) = switch (field.type) {
+                    u8 => if (val.len == 1) val[0]
+                        else ArgsError.InvalidArgument,
+                    u32, i32 => std.fmt.parseInt(field.type, val, 10),
+                    Cardinal => ascardinal: {
+                        const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
+                        if (eqlIgnoreCase(val, "w") or
+                            eqlIgnoreCase(val, "west")) {
+                            break :ascardinal Cardinal.west;
+                        } else if (eqlIgnoreCase(val, "e") or
+                            eqlIgnoreCase(val, "east")) {
+                            break :ascardinal Cardinal.east;
+                        } else if (eqlIgnoreCase(val, "n") or
+                            eqlIgnoreCase(val, "north")) {
+                            break :ascardinal Cardinal.north;
+                        } else if (eqlIgnoreCase(val, "s") or
+                            eqlIgnoreCase(val, "south")) {
+                            break :ascardinal Cardinal.south;
+                        } else {
+                            break :ascardinal ArgsError.InvalidArgument;
+                        }
                     },
                     else => {
-                        std.log.err("unknown flag -{c}", .{flag});
-                        return ArgsError.InvalidArgument;
+                        @compileLog(field.type);
+                        @compileError("unimplemented arg type");
                     }
+                } catch {
+                    std.log.err("invalid value {s} '{s}'", .{arg, val});
+                    return ArgsError.InvalidArgument;
                 };
-            } else {
-                std.log.err("unknown option {s}", .{arg});
-                return ArgsError.InvalidArgument;
+
+                continue :argloop;
             }
-        } else {
-            std.log.err("unknown option {s}", .{arg});
-            return ArgsError.InvalidArgument;
         }
+
+        // Handle grouped flags e.g. '-rSD'
+        if (arg.len >= 2) {
+            if (arg[0] == '-' and arg[1] != '-') {
+                flagloop: for (arg[1..]) |flag| {
+                    // Set matching template value to true
+                    inline for (templates) |field| {
+                        if (flagInTemplate(flag, field.name)) {
+                            if (field.type == bool) {
+                                @field(results, field.name) = true;
+                                continue :flagloop;
+                            }
+                        }
+                    }
+
+                    // If no templates matched
+                    std.log.err("unknown flag '{c}' in '{s}'", .{flag, arg});
+                    return ArgsError.InvalidArgument;
+                }
+
+                continue :argloop;
+            }
+        }
+
+        // If nothing matched, it's an invalid argument
+        std.log.err("unknown option '{s}'", .{arg});
+        return ArgsError.InvalidArgument;
     }
 
-    return params;
+    return results;
 }
+
+const Fold = enum(u1) {
+    left,
+    right,
+
+    fn reversed(self: @This()) @This() {
+        return @enumFromInt(~@intFromEnum(self));
+    }
+};
 
 const FoldsError = error { ExceedsLimit, OutOfMemory };
 
@@ -422,10 +468,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Parse Arguments
     const args = try init.minimal.args.toSlice(allocator);
-    const params: DragonParameters = parseArgsSlice(args[1..]) catch .{
-        .help=true
+    const params: Arguments = parseArgsSlice(args[1..]) catch .{
+        .@"-h --help"=true
     };
-    if (params.help) {
+    if (params.@"-h --help") {
         try stdout.writeAll(help_message);
         try stdout.flush();
         return;
@@ -434,13 +480,13 @@ pub fn main(init: std.process.Init) !void {
     // Generate the array of folds
     const folds: []Fold = generateFolds(
         allocator,
-        params.n,
-        if (params.right) .right else .left,
+        params.@"-n",
+        if (params.@"m --mirror") .right else .left,
     ) catch |err| switch (err) {
         error.ExceedsLimit => {
             std.log.err(
                 "exceeded iteration limit {} > {}",
-                .{params.n, n_limit}
+                .{params.@"-n", n_limit}
             );
             return;
         },
@@ -448,20 +494,21 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Print fold sequence
-    if (params.sequence) {
+    if (params.@"f --folds") {
         try printFolds(stdout, folds);
-        if (params.draw) try stdout.writeAll("\n");
+        if (params.@"D --draw") try stdout.writeAll("\n");
     }
 
     // Print fractal drawing
-    if (params.draw) {
+    if (params.@"D --draw" or (!params.@"f --folds"
+        and !params.@"D --draw")) {
         printDragon(
             allocator,
             stdout,
             folds,
-            params.start,
-            params.brush,
-            params.scale,
+            params.@"-d --direction",
+            params.@"-b --brush",
+            params.@"-x --scale",
         ) catch |err| switch (err) {
             error.Overflow, error.CanvasTooBig => {
                 std.log.err("drawing is too big", .{});
