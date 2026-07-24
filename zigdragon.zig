@@ -1,6 +1,8 @@
 // zigdragon.zig
 // Author: Riley Mann
 //
+// using Zig version 0.16.0
+//
 // try `zig run zigdragon.zig -- -h`
 //
 // Created on 18 Jul 2026
@@ -21,7 +23,7 @@ const help_message =
     \\  -n <iteration>              Number of iterations the pattern is folded
     \\                              (default: 10)
     \\  -x, --scale <len>           Segment length between each fold (default: 1)
-    \\  -b, --brush <char>          Ascii character to draw with (default: 'o')
+    \\  -b, --brush <char>          Ascii character to draw with (default: '#')
     \\  -d, --direction <heading>   Cardinal direction to start the curve with
     \\                              e.g. N, S, E, W (default: S)
     \\  -h, --help                  Show help
@@ -44,7 +46,7 @@ const Cardinal = enum(u2) {
 };
 
 // Command line options
-// The name of each field is a template to compare with
+// The name of each field is a template to compare args with
 // Single character names are for flags
 const Arguments = struct {
     @"m --mirror": bool = false,
@@ -52,7 +54,7 @@ const Arguments = struct {
     @"D --draw": bool = false,
     @"-n": u32 = 10,
     @"-x --scale": u32 = 1,
-    @"-b --brush": u8 = 'o',
+    @"-b --brush": u8 = '#',
     @"-d --direction": Cardinal = .south,
     @"-h --help": bool = false,
 };
