@@ -9,7 +9,7 @@
 
 const std = @import("std");
 
-const n_limit = 23; // Keeps the fractal below 10M folds
+const n_limit = 23; // Limit the fractal to ~8M folds
 const canvas_limit = 16777216; // limit the drawing size
 const help_message =
     \\Usage: zigdragon [-mfD] [-n <iteration>]...
@@ -20,8 +20,8 @@ const help_message =
     \\  -m, --mirror                Generate a right instead of left-handed curve
     \\  -f, --folds                 Output the sequence of folds
     \\  -D, --draw                  Draw the fractal (drawn by default)
-    \\  -n <iteration>              Number of iterations the pattern is folded
-    \\                              (default: 10)
+    \\  -n <iteration>              Number of iterations the pattern is folded,
+    \\                              iteration < 24 (default: 10)
     \\  -x, --scale <len>           Segment length between each fold (default: 1)
     \\  -b, --brush <char>          Ascii character to draw with (default: '#')
     \\  -d, --direction <heading>   Cardinal direction to start the curve with
@@ -233,45 +233,110 @@ const Fold = enum(u1) {
 
 const FoldsError = error { ExceedsLimit, OutOfMemory };
 
-fn generateFolds(
+const Folds = struct {
     allocator: std.mem.Allocator,
-    n: u32,
-    hand: Fold,
-) FoldsError![]Fold {
-    if (n > n_limit) return FoldsError.ExceedsLimit;
+    data: []const u8,
+    len: usize,
+    index: usize = 0,
+    reader: u8 = 0,
 
-    // Calculate the required array length and initialize the array
-    const n_folds: usize = foldsmath: {
-        var result: usize = 0;
-        for (0..n) |_| result = (result << 1) + 1;
-        break :foldsmath result;
-    };
-    var folds: []Fold = try allocator.alloc(Fold, n_folds);
-    // if further errors are possible: errdefer allocator.free(folds);
+    fn generate(allocator: std.mem.Allocator, n: u32, hand: Fold) !@This() {
+        if (n > n_limit) return FoldsError.ExceedsLimit;
 
-    // Generate the fractal
-    var i: usize = 0;
-    var pattern_end: usize = 0;
-    for (0..n) |_| {
-        folds[i] = hand;
-        i += 1;
-        for (0..pattern_end) |pattern_i| {
-            folds[i] = folds[pattern_end - pattern_i - 1].reversed();
-            i += 1;
+        // Calculate the required array length and initialize the array
+        const folds_len: usize = folds_len: {
+            var result: usize = 0;
+            for (0..n) |_| result = (result << 1) + 1;
+            break :folds_len result;
+        };
+        const data_len: usize = data_len: {
+            var result: usize = folds_len >> 3;
+            if (folds_len & 7 > 0) result += 1;
+            break :data_len result;
+        };
+        var data: []u8 = try allocator.alloc(u8, data_len);
+        // if further errors are possible: errdefer allocator.free(data);
+
+        // Initialize the bytes as zeroes
+        for (data, 0..) |_, i| data[i] = 0;
+
+        // Generate the fractal
+        const hand_as_bit: u8 = @intFromEnum(hand);
+        var end: usize = 0;
+        for (0..n) |_| {
+            const pivot: usize = end >> 3;
+            const alignment: u3 = @truncate(end);
+
+            // Set the end bit
+            data[pivot] |=  hand_as_bit << alignment;
+
+            // Fold the pattern from the pivot byte around the end bit
+            if (alignment != 0) {
+                const flipped: u8 =
+                    ~@bitReverse(data[pivot]) >> (7 - alignment + 1);
+                if (alignment != 7) {
+                    data[pivot] |= flipped << (alignment + 1);
+                }
+                if (alignment > 3) {
+                    data[pivot + 1] |= flipped >> (7 - alignment);
+                }
+            }
+
+            // Fold the pattern from all previous bytes around the end bit
+            for (1..pivot + 1) |radius| {
+                const flipped: u8 = ~@bitReverse(data[pivot - radius]);
+                data[pivot + radius] |= flipped << alignment;
+                if (alignment != 0) {
+                    data[pivot + radius + 1] |= flipped >> (7 - alignment + 1);
+                }
+            }
+
+            // Move the end bit to the end of the pattern
+            end = (end << 1) + 1;
         }
-        pattern_end = i;
+
+        return .{ .allocator=allocator, .data=data, .len=folds_len };
     }
 
-    return folds;
-}
+    fn deinit(self: @This()) void {
+        self.allocator.free(self.data);
+    }
 
-fn printFolds(w: *std.Io.Writer, folds: []Fold) std.Io.Writer.Error!void {
-    for (folds) |fold| switch (fold) {
-        .left => try w.writeAll("L"),
-        .right => try w.writeAll("R"),
-    };
-    try w.writeAll("\n");
-    try w.flush();
+    fn print(self: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
+        var it: FoldsIterator = .{ .folds = &self };
+        while (it.next()) |fold| switch (fold) {
+            .left => try w.writeAll("L"),
+            .right => try w.writeAll("R"),
+        };
+        try w.writeAll("\n");
+        try w.flush();
+    }
+};
+
+const FoldsIterator = struct {
+    folds: *const Folds,
+    index: usize = 0,
+    reader: u8 = 0,
+
+    fn next(self: *@This()) ?Fold {
+        if (self.index >= self.folds.len) return null;
+        if (self.index & 7 == 0) self.reader = self.folds.data[self.index >> 3];
+        const result: Fold = @enumFromInt(@as(u1, @truncate(self.reader)));
+        self.index += 1;
+        self.reader >>= 1;
+        return result;
+    }
+
+    fn reset(self: *@This()) void {
+        self.index = 0;
+    }
+};
+
+test Folds {
+    const allocator = std.testing.allocator;
+
+    const folds = try Folds.generate(allocator, 23, .left);
+    defer folds.deinit();
 }
 
 const Envelope = struct {
@@ -314,7 +379,7 @@ const Envelope = struct {
     }
 };
 
-const CanvasError = error { OffCanvas, CanvasTooBig };
+const CanvasError = error { CanvasTooBig, OffCanvas };
 
 const Canvas = struct {
     allocator: std.mem.Allocator,
@@ -402,19 +467,41 @@ const Canvas = struct {
     }
 };
 
+test Canvas {
+    const allocator = std.testing.allocator;
+
+    var canvas = try Canvas.init(allocator, 7, 7);
+    defer canvas.deinit();
+
+    try canvas.placeBrush(2, 2, '0');
+    try canvas.moveBrush(.east, 2, '1');
+    try canvas.moveBrush(.south, 2, '2');
+    try canvas.moveBrush(.west, 4, '3');
+    try canvas.moveBrush(.north, 4, '4');
+    try canvas.moveBrush(.east, 6, '5');
+    try canvas.moveBrush(.south, 6, '6');
+    try canvas.moveBrush(.west, 6, '7');
+    try std.testing.expectEqual(
+        CanvasError.OffCanvas,
+        canvas.moveBrush(.west, 1, '8'),
+    );
+}
+
 fn printDragon(
     allocator: std.mem.Allocator,
     w: *std.Io.Writer,
-    folds: []Fold,
+    folds: Folds,
     starting_direction: Cardinal,
     brush: u8,
     segment_length: u32,
 ) !void {
+    var it: FoldsIterator = .{ .folds = &folds };
+
     // Walk along the fractal for drawing dimensions and starting position
     var envelope: Envelope = .{};
     var heading = starting_direction;
     envelope.walk(heading);
-    for (folds) |fold| {
+    while (it.next()) |fold| {
         switch (fold) {
             .left => heading.rotate(1),
             .right => heading.rotate(-1),
@@ -448,7 +535,8 @@ fn printDragon(
     );
     heading = starting_direction;
     try canvas.moveBrush(heading, segment_length, brush);
-    for (folds) |fold| {
+    it.reset();
+    while (it.next()) |fold| {
         switch (fold) {
             .left => heading.rotate(1),
             .right => heading.rotate(-1),
@@ -457,6 +545,20 @@ fn printDragon(
     }
 
     try canvas.print(w);
+}
+
+test "Memory Usage" {
+    std.debug.print("testing memory usage:\n", .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const folds = try Folds.generate(allocator, 23, .left);
+    std.debug.print("generated {} folds\n", .{folds.len});
+
+    std.debug.print("test run used {} bytes\n", .{arena.queryCapacity()});
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -479,8 +581,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // Generate the array of folds
-    const folds: []Fold = generateFolds(
+    // Generate folds
+    const folds = Folds.generate(
         allocator,
         params.@"-n",
         if (params.@"m --mirror") .right else .left,
@@ -497,7 +599,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Print fold sequence
     if (params.@"f --folds") {
-        try printFolds(stdout, folds);
+        try folds.print(stdout);
         if (params.@"D --draw") try stdout.writeAll("\n");
     }
 
