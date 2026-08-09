@@ -25,13 +25,13 @@ zigdragon is a Heighway curve generator.
 
 Drawing Styles:
   none       no drawing
-  arcs       unicode light box characters with rounded corners
+  arcs       utf-8 light box characters with rounded corners
   ascii      plain ascii using the [--brush] character
-  blocks     unicode block element patterns
-  box        (default) unicode light box drawing characters
-  braille    unicode braille patterns
-  doublebox  unicode double box drawing characters
-  heavybox   unicode heavy box drawing characters
+  blocks     utf-8 block element patterns
+  box        (default) utf-8 light box drawing characters
+  braille    utf-8 braille patterns
+  doublebox  utf-8 double box drawing characters
+  heavybox   utf-8 heavy box drawing characters
 
 Options:
   -f, --folds                 Print the sequence of folds
