@@ -9,26 +9,48 @@
 
 const std = @import("std");
 
-const n_limit = 23; // Limit the fractal to ~8M folds
-const canvas_limit = 16777216; // limit the drawing size
 const help_message =
-    \\Usage: zigdragon [-mfD] [-n <iteration>]...
+    \\Usage: zigdragon [-fm] [-s/--style <style>] [-n <iteration>]...
     \\
     \\zigdragon is a Heighway curve generator.
     \\
+    \\Drawing Styles:
+    \\  none       no drawing
+    \\  arcs       unicode light box characters with rounded corners
+    \\  ascii      plain ascii using the [--brush] character
+    \\  blocks     unicode block element patterns
+    \\  box        (default) unicode light box drawing characters
+    \\  braille    unicode braille patterns
+    \\  doublebox  unicode double box drawing characters
+    \\  heavybox   unicode heavy box drawing characters
+    \\
     \\Options:
+    \\  -f, --folds                 Print the sequence of folds
     \\  -m, --mirror                Generate a right instead of left-handed curve
-    \\  -f, --folds                 Output the sequence of folds
-    \\  -D, --draw                  Draw the fractal (drawn by default)
+    \\  -s, --style <style>         Drawing style (see the styles listed above)
     \\  -n <iteration>              Number of iterations the pattern is folded,
     \\                              iteration < 24 (default: 10)
     \\  -x, --scale <len>           Segment length between each fold (default: 1)
-    \\  -b, --brush <char>          Ascii character to draw with (default: '#')
     \\  -d, --direction <heading>   Cardinal direction to start the curve with
     \\                              e.g. N, S, E, W (default: S)
+    \\  -b, --brush <char>          Ascii character to draw with in 'ascii' style
+    \\                              (default: '#')
     \\  -h, --help                  Show help
     \\
 ;
+const n_limit = 23; // Limit the fractal to ~8M folds
+const canvas_limit = 16777216; // canvas limit in bytes
+
+const DrawingStyle = enum {
+    none,
+    arcs,
+    ascii,
+    blocks,
+    box,
+    braille,
+    doublebox,
+    heavybox,
+};
 
 const Cardinal = enum(u2) {
     east,
@@ -36,12 +58,11 @@ const Cardinal = enum(u2) {
     west,
     south,
 
-    // Rotates the value (positive: E->N->W->S->E)
-    fn rotate(self: *@This(), by: i32) void {
-        if (by == 0) return;
-        var heading: u2 = @intFromEnum(self.*);
+    // Calculates the rotated the value (positive: E->N->W->S->E)
+    fn rotated(self: @This(), by: i32) @This() {
+        var heading: u2 = @intFromEnum(self);
         heading +%= @as(u2, @intCast(@mod(by, 4)));
-        self.* = @enumFromInt(heading);
+        return @enumFromInt(heading);
     }
 };
 
@@ -51,7 +72,7 @@ const Cardinal = enum(u2) {
 const Arguments = struct {
     @"m --mirror": bool = false,
     @"f --folds": bool = false,
-    @"D --draw": bool = false,
+    @"-s --style": DrawingStyle = .box,
     @"-n": u32 = 10,
     @"-x --scale": u32 = 1,
     @"-b --brush": u8 = '#',
@@ -155,11 +176,23 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                 const val = args[args_i];
 
                 // Currently implemented parameter types:
-                // u8, u32, i32, Cardinal
+                // u8, u32, i32, DrawingStyle Cardinal
                 @field(results, field.name) = switch (field.type) {
                     u8 => if (val.len == 1) val[0]
                         else ArgsError.InvalidArgument,
                     u32, i32 => std.fmt.parseInt(field.type, val, 10),
+                    DrawingStyle => asdrawingstyle: {
+                        const styles = @typeInfo(DrawingStyle).@"enum".fields;
+                        inline for (styles) |style| {
+                            if (std.ascii.eqlIgnoreCase(val, style.name)) {
+                                break :asdrawingstyle @as(
+                                    DrawingStyle,
+                                    @enumFromInt(style.value),
+                                );
+                            }
+                        }
+                        break :asdrawingstyle ArgsError.InvalidArgument;
+                    },
                     Cardinal => ascardinal: {
                         const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
                         if (eqlIgnoreCase(val, "w") or
@@ -379,46 +412,61 @@ const Envelope = struct {
     }
 };
 
-const CanvasError = error { CanvasTooBig, OffCanvas };
+const CanvasError = error { CanvasTooBig, InvalidBrush, OffCanvas };
 
-const Canvas = struct {
+const BinaryCanvas = struct {
     allocator: std.mem.Allocator,
-    canvas: []u8,
+    bytes: []u8,
+    bwidth: usize,
+    bheight: usize,
     width: u32,
     height: u32,
     x: u32 = 0,
     y: u32 = 0,
 
-    // Allocates and fills the canvas with spaces
+    // Allocates and fills the canvas with zeroes
+    // 0 1 <- Each u8 represents an 8 pixel tile
+    // 2 3
+    // 4 5
+    // 6 7
     fn init(
         allocator: std.mem.Allocator,
         width: u32,
         height: u32,
     ) !@This() {
-        const canvas_size = try std.math.mul(
-            u32,
-            try std.math.add(u32, width, 1),
-            height
-        );
-        if (canvas_size > canvas_limit) return CanvasError.CanvasTooBig;
-        var canvas: []u8 = try allocator.alloc(u8, canvas_size);
-        errdefer allocator.free(canvas);
+        // Calculate the required bytes
+        const bwidth: usize = bwidth: {
+            var result: usize = width >> 1;
+            if (width & 1 > 0) result += 1;
+            break :bwidth result;
+        };
+        const bheight: usize = bheight: {
+            var result: usize = height >> 2;
+            if (height & 3 > 0) result += 1;
+            break :bheight result;
+        };
+        const size = try std.math.mul(usize, bwidth, bheight);
+        if (size > canvas_limit) return CanvasError.CanvasTooBig;
 
-        // Clean canvas with newlines at the end of each row
-        for (0..canvas.len) |i| {
-            canvas[i] = if ((i + 1) % (width + 1) == 0) '\n' else ' ';
-        }
+        // Allocate bytes
+        var bytes: []u8 = try allocator.alloc(u8, size);
+        errdefer allocator.free(bytes);
+
+        // Fill canvas with zeroes
+        for (0..size) |i| bytes[i] = 0;
 
         return .{
             .allocator = allocator,
-            .canvas = canvas,
+            .bytes = bytes,
+            .bwidth = bwidth,
+            .bheight = bheight,
             .width = width,
             .height = height,
         };
     }
 
     fn deinit(self: @This()) void {
-        self.allocator.free(self.canvas);
+        self.allocator.free(self.bytes);
     }
 
     // Sets x, y and draws at that point
@@ -426,15 +474,14 @@ const Canvas = struct {
         self: *@This(),
         x: u32,
         y: u32,
-        brush: u8,
     ) CanvasError!void {
-        if (x >= self.width or y >= self.height) {
-            return CanvasError.OffCanvas;
-        }
-
+        if (x >= self.width or y >= self.height) return CanvasError.OffCanvas;
         self.x = x;
         self.y = y;
-        self.canvas[x + y * (self.width + 1)] = brush;
+        const bx: usize = x >> 1;
+        const by: usize = y >> 2;
+        const shift_amt: u3 = @truncate((x & 1) + ((y & 3) << 1));
+        self.bytes[bx + by * self.bwidth] |= @as(u8, 1) << shift_amt;
     }
 
     // Moves the brush along a cardinal direction while drawing
@@ -442,59 +489,395 @@ const Canvas = struct {
         self: *@This(),
         heading: Cardinal,
         distance: u32,
-        brush: u8,
     ) CanvasError!void {
         for (0..distance) |_| {
             switch (heading) {
                 .west => {
                     if (self.x == 0) return CanvasError.OffCanvas;
-                    try self.placeBrush(self.x - 1, self.y, brush);
+                    try self.placeBrush(self.x - 1, self.y);
                 },
-                .east => try self.placeBrush(self.x + 1, self.y, brush),
+                .east => try self.placeBrush(self.x + 1, self.y),
                 .north => {
                     if (self.y == 0) return CanvasError.OffCanvas;
-                    try self.placeBrush(self.x, self.y - 1, brush);
+                    try self.placeBrush(self.x, self.y - 1);
                 },
-                .south => try self.placeBrush(self.x, self.y + 1, brush),
+                .south => try self.placeBrush(self.x, self.y + 1),
             }
         }
     }
 
-    // Prints the drawing to a Writer
-    fn print(self: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.writeAll(self.canvas);
+    // Prints the canvas using an ascii brush
+    fn asciiPrint(self: @This(), w: *std.Io.Writer, brush: u8) !void {
+        if (!std.ascii.isAscii(brush)) return CanvasError.InvalidBrush;
+        if (self.bytes.len == 0) return;
+        for (0..self.height) |y| {
+            const by: usize = y >> 2;
+            var tile: u8 = undefined;
+            for (0..self.width) |x| {
+                const bx = x >> 1;
+                if (x & 1 == 0) tile = self.bytes[bx + by * self.bwidth];
+                const shift_amt: u3 = @truncate((x & 1) + ((y & 3) << 1));
+                if ((tile >> shift_amt) & 1 != 0) {
+                    try w.writeByte(brush);
+                } else {
+                    try w.writeByte(' ');
+                }
+            }
+            try w.writeByte('\n');
+        }
+        try w.flush();
+    }
+
+    // Converts canvas tiles to UTF-8 braille patterns
+    fn utf8Braille(tile: u8) u21 {
+        var result: u21 = 0x2800;
+        result |= tile & 0b11100001;
+        result |= (tile & 0b00000010) << 2;
+        result |= (tile & 0b00000100) >> 1;
+        result |= (tile & 0b00001000) << 1;
+        result |= (tile & 0b00010000) >> 2;
+        return result;
+    }
+
+    // Prints the canvas using unicode braille characters
+    fn braillePrint(self: @This(), w: *std.Io.Writer) !void {
+        if (self.bytes.len == 0) return;
+        var character: [3]u8 = @splat(0);
+        for (0..self.bheight) |by| {
+            for (0..self.bwidth) |bx| {
+                _ = try std.unicode.utf8Encode(
+                    utf8Braille(self.bytes[bx + by * self.bwidth]),
+                    &character,
+                );
+                try w.writeAll(&character);
+            }
+            try w.writeByte('\n');
+        }
+        try w.flush();
+    }
+
+    // Converts canvas halftiles to UTF-8 block patterns
+    // 0 1 <- halftile bits
+    // 2 3
+    fn utf8Block(halftile: u4) u21 {
+        switch (halftile) {
+            0b0000 => return ' ',    // empty
+            0b0001 => return 0x2598, // quadrant upper left
+            0b0010 => return 0x259D, // quadrant upper right
+            0b0011 => return 0x2580, // upper half block
+            0b0100 => return 0x2596, // quadrant lower left
+            0b0101 => return 0x258C, // left half block
+            0b0110 => return 0x259E, // quadrant upper R, lower L
+            0b0111 => return 0x259B, // quadrant upper L, upper R, lower L
+            0b1000 => return 0x2597, // quadrant lower right
+            0b1001 => return 0x259A, // quadrant upper L, lower R
+            0b1010 => return 0x2590, // right half block
+            0b1011 => return 0x259C, // quadrant upper L, upper R, lower R
+            0b1100 => return 0x2584, // lower half block
+            0b1101 => return 0x2599, // quadrant upper L, lower L, lower R
+            0b1110 => return 0x259F, // quadrant upper R, lower L, lower R
+            0b1111 => return 0x2588, // full block
+        }
+    }
+
+    // Prints the canvas using unicode block characters
+    fn blockyPrint(self: @This(), w: *std.Io.Writer) !void {
+        if (self.bytes.len == 0) return;
+        var character: [3]u8 = @splat(0);
+        for (0..self.bheight) |by| {
+            // Print upper half
+            for (0..self.bwidth) |bx| {
+                const halftile: u4 = @truncate(
+                    self.bytes[bx + by * self.bwidth]
+                );
+                const length = try std.unicode.utf8Encode(
+                    utf8Block(halftile),
+                    &character,
+                );
+                try w.writeAll(character[0..length]);
+            }
+            try w.writeByte('\n');
+
+            // Print lower half
+            for (0..self.bwidth) |bx| {
+                const halftile: u4 = @truncate(
+                    self.bytes[bx + by * self.bwidth] >> 4
+                );
+                const length = try std.unicode.utf8Encode(
+                    utf8Block(halftile),
+                    &character,
+                );
+                try w.writeAll(character[0..length]);
+            }
+            try w.writeByte('\n');
+        }
         try w.flush();
     }
 };
 
-test Canvas {
+test BinaryCanvas {
     const allocator = std.testing.allocator;
 
-    var canvas = try Canvas.init(allocator, 7, 7);
+    var canvas = try BinaryCanvas.init(allocator, 19, 9);
     defer canvas.deinit();
 
-    try canvas.placeBrush(2, 2, '0');
-    try canvas.moveBrush(.east, 2, '1');
-    try canvas.moveBrush(.south, 2, '2');
-    try canvas.moveBrush(.west, 4, '3');
-    try canvas.moveBrush(.north, 4, '4');
-    try canvas.moveBrush(.east, 6, '5');
-    try canvas.moveBrush(.south, 6, '6');
-    try canvas.moveBrush(.west, 6, '7');
-    try std.testing.expectEqual(
-        CanvasError.OffCanvas,
-        canvas.moveBrush(.west, 1, '8'),
-    );
+    try std.testing.expectEqual(10, canvas.bwidth);
+    try std.testing.expectEqual(3, canvas.bheight);
+
+    var canvas2 = try BinaryCanvas.init(allocator, 4, 6);
+    defer canvas2.deinit();
+
+    try canvas2.placeBrush(1, 3);
+    try canvas2.moveBrush(.west, 1);
+    try canvas2.moveBrush(.north, 3);
+    try canvas2.moveBrush(.east, 3);
+    try canvas2.moveBrush(.south, 5);
+    try canvas2.moveBrush(.west, 3);
+
+    try std.testing.expectEqual(0b1101_0111, canvas2.bytes[0]);
+    try std.testing.expectEqual(0b1010_1011, canvas2.bytes[1]);
+    try std.testing.expectEqual(0b0000_1100, canvas2.bytes[2]);
+    try std.testing.expectEqual(0b0000_1110, canvas2.bytes[3]);
 }
 
-fn printDragon(
+const JunctionCanvas = struct {
     allocator: std.mem.Allocator,
-    w: *std.Io.Writer,
+    bytes: []u8,
+    bwidth: u32,
+    width: u32,
+    height: u32,
+    x: u32 = 0,
+    y: u32 = 0,
+
+    // Allocates and fills the canvas with zeroes
+    // |  1  |  5  | <- Each u8 represents two adjacent junctions
+    // |2   0|6   4|
+    // |  3  |  7  |
+    fn init(
+        allocator: std.mem.Allocator,
+        width: u32,
+        height: u32,
+    ) !@This() {
+        // Calculate the required bytes
+        const bwidth: u32 = bwidth: {
+            var result: u32 = width >> 1;
+            if (width & 1 > 0) result += 1;
+            break :bwidth result;
+        };
+        const size = try std.math.mul(u32, bwidth, height);
+        if (size > canvas_limit) return CanvasError.CanvasTooBig;
+
+        // Allocate bytes
+        var bytes: []u8 = try allocator.alloc(u8, size);
+        errdefer allocator.free(bytes);
+
+        // Fill canvas with zeroes
+        for (0..size) |i| bytes[i] = 0;
+
+        return .{
+            .allocator = allocator,
+            .bytes = bytes,
+            .bwidth = bwidth,
+            .width = width,
+            .height = height,
+        };
+    }
+
+    fn deinit(self: @This()) void {
+        self.allocator.free(self.bytes);
+    }
+
+    // Sets the brush x, y
+    fn placeBrush(
+        self: *@This(),
+        x: u32,
+        y: u32,
+    ) CanvasError!void {
+        if (x >= self.width or y >= self.height) return CanvasError.OffCanvas;
+        self.x = x;
+        self.y = y;
+    }
+
+    // Moves the brush along a cardinal direction while drawing
+    fn moveBrush(
+        self: *@This(),
+        heading: Cardinal,
+        distance: u32,
+    ) CanvasError!void {
+        var bx: u32 = self.x >> 1;
+        for (0..distance) |_| {
+            // Update leaving junction
+            var update: u8 = @as(u8, 1) << @intFromEnum(heading);
+            if (self.x & 1 != 0) update <<= 4;
+            self.bytes[bx + self.y * self.bwidth] |= update;
+
+            // Move
+            switch (heading) {
+                .west => {
+                    if (self.x == 0) return CanvasError.OffCanvas;
+                    try self.placeBrush(self.x - 1, self.y);
+                    bx = self.x >> 1;
+                },
+                .east => {
+                    try self.placeBrush(self.x + 1, self.y);
+                    bx = self.x >> 1;
+                },
+                .north => {
+                    if (self.y == 0) return CanvasError.OffCanvas;
+                    try self.placeBrush(self.x, self.y - 1);
+                },
+                .south => try self.placeBrush(self.x, self.y + 1),
+            }
+
+            // Update entering junction
+            update = @as(u8, 1) << @intFromEnum(heading.rotated(2));
+            if (self.x & 1 != 0) update <<= 4;
+            self.bytes[bx + self.y * self.bwidth] |= update;
+        }
+    }
+
+    const BoxStyle = enum {
+        light,
+        heavy,
+        double,
+        arcs,
+    };
+
+    // Converts junction directions to UTF-8 box drawing characters
+    // |  1  | <- direction bits
+    // |2   0|
+    // |  3  |
+    fn utf8Box(directions: u4, style: BoxStyle) u21 {
+        switch (style) {
+            .light => switch (directions) {
+                0b0000 => return ' ',
+                0b0001 => return 0x2576,
+                0b0010 => return 0x2575,
+                0b0011 => return 0x2514,
+                0b0100 => return 0x2574,
+                0b0101 => return 0x2500,
+                0b0110 => return 0x2518,
+                0b0111 => return 0x2534,
+                0b1000 => return 0x2577,
+                0b1001 => return 0x250C,
+                0b1010 => return 0x2502,
+                0b1011 => return 0x251C,
+                0b1100 => return 0x2510,
+                0b1101 => return 0x252C,
+                0b1110 => return 0x2524,
+                0b1111 => return 0x253C,
+            },
+            .heavy => switch (directions) {
+                0b0000 => return ' ',
+                0b0001 => return 0x257A,
+                0b0010 => return 0x2579,
+                0b0011 => return 0x2517,
+                0b0100 => return 0x2578,
+                0b0101 => return 0x2501,
+                0b0110 => return 0x251B,
+                0b0111 => return 0x253B,
+                0b1000 => return 0x257B,
+                0b1001 => return 0x250F,
+                0b1010 => return 0x2503,
+                0b1011 => return 0x2523,
+                0b1100 => return 0x2513,
+                0b1101 => return 0x2533,
+                0b1110 => return 0x252B,
+                0b1111 => return 0x254B,
+            },
+            .double => switch (directions) {
+                0b0000 => return ' ',
+                0b0001 => return 0x255E,
+                0b0010 => return 0x2568,
+                0b0011 => return 0x255A,
+                0b0100 => return 0x2561,
+                0b0101 => return 0x2550,
+                0b0110 => return 0x255D,
+                0b0111 => return 0x2569,
+                0b1000 => return 0x2565,
+                0b1001 => return 0x2554,
+                0b1010 => return 0x2551,
+                0b1011 => return 0x2560,
+                0b1100 => return 0x2557,
+                0b1101 => return 0x2566,
+                0b1110 => return 0x2563,
+                0b1111 => return 0x256C,
+            },
+            .arcs => switch (directions) {
+                0b0000 => return ' ',
+                0b0001 => return 0x2576,
+                0b0010 => return 0x2575,
+                0b0011 => return 0x2570,
+                0b0100 => return 0x2574,
+                0b0101 => return 0x2500,
+                0b0110 => return 0x256F,
+                0b0111 => return 0x2534,
+                0b1000 => return 0x2577,
+                0b1001 => return 0x256D,
+                0b1010 => return 0x2502,
+                0b1011 => return 0x251C,
+                0b1100 => return 0x256E,
+                0b1101 => return 0x252C,
+                0b1110 => return 0x2524,
+                0b1111 => return 0x253C,
+            },
+        }
+    }
+
+    // Prints the canvas using unicode box drawing characters
+    fn print(self: @This(), w: *std.Io.Writer, style: BoxStyle) !void {
+        if (self.bytes.len == 0) return;
+        var character: [3]u8 = @splat(0);
+        for (0..self.height) |by| {
+            for (0..self.bwidth) |bx| {
+                const byte = self.bytes[bx + by * self.bwidth];
+
+                // First junction in the byte
+                var length = try std.unicode.utf8Encode(
+                    utf8Box(@truncate(byte), style),
+                    &character,
+                );
+                try w.writeAll(character[0..length]);
+
+                // Second junction in the byte
+                length = try std.unicode.utf8Encode(
+                    utf8Box(@truncate(byte >> 4), style),
+                    &character,
+                );
+                try w.writeAll(character[0..length]);
+            }
+            try w.writeByte('\n');
+        }
+        try w.flush();
+    }
+};
+
+test JunctionCanvas {
+    const allocator = std.testing.allocator;
+
+    var canvas = try JunctionCanvas.init(allocator, 3, 2);
+    defer canvas.deinit();
+
+    try std.testing.expectEqual(4, canvas.bytes.len);
+
+    // Draw in a circle
+    try canvas.placeBrush(1, 1);
+    try canvas.moveBrush(.west, 1);
+    try canvas.moveBrush(.north, 1);
+    try canvas.moveBrush(.east, 1);
+    try canvas.moveBrush(.south, 1);
+
+    try std.testing.expectEqual(0b1100_1001, canvas.bytes[0]);
+    try std.testing.expectEqual(0b0110_0011, canvas.bytes[2]);
+}
+
+fn drawDragon(
+    comptime CanvasT: type,
+    allocator: std.mem.Allocator,
     folds: Folds,
     starting_direction: Cardinal,
-    brush: u8,
     segment_length: u32,
-) !void {
+) !CanvasT {
     var it: FoldsIterator = .{ .folds = &folds };
 
     // Walk along the fractal for drawing dimensions and starting position
@@ -503,8 +886,8 @@ fn printDragon(
     envelope.walk(heading);
     while (it.next()) |fold| {
         switch (fold) {
-            .left => heading.rotate(1),
-            .right => heading.rotate(-1),
+            .left => heading = heading.rotated(1),
+            .right => heading = heading.rotated(-1),
         }
         envelope.walk(heading);
     }
@@ -524,41 +907,26 @@ fn printDragon(
     ));
 
     // Initialize the canvas
-    var canvas: Canvas = try .init(allocator, width, height);
-    defer canvas.deinit();
+    var canvas: CanvasT = try .init(allocator, width, height);
+    errdefer canvas.deinit();
 
     // Draw the fractal
     try canvas.placeBrush(
         segment_length * envelope.l,
         segment_length * envelope.t,
-        brush,
     );
     heading = starting_direction;
-    try canvas.moveBrush(heading, segment_length, brush);
+    try canvas.moveBrush(heading, segment_length);
     it.reset();
     while (it.next()) |fold| {
         switch (fold) {
-            .left => heading.rotate(1),
-            .right => heading.rotate(-1),
+            .left => heading = heading.rotated(1),
+            .right => heading = heading.rotated(-1),
         }
-        try canvas.moveBrush(heading, segment_length, brush);
+        try canvas.moveBrush(heading, segment_length);
     }
 
-    try canvas.print(w);
-}
-
-test "Memory Usage" {
-    std.debug.print("testing memory usage:\n", .{});
-
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
-
-    const folds = try Folds.generate(allocator, 23, .left);
-    std.debug.print("generated {} folds\n", .{folds.len});
-
-    std.debug.print("test run used {} bytes\n", .{arena.queryCapacity()});
+    return canvas;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -600,25 +968,70 @@ pub fn main(init: std.process.Init) !void {
     // Print fold sequence
     if (params.@"f --folds") {
         try folds.print(stdout);
-        if (params.@"D --draw") try stdout.writeAll("\n");
+        if (params.@"-s --style" != .none) try stdout.writeAll("\n");
     }
 
-    // Print fractal drawing
-    if (params.@"D --draw" or (!params.@"f --folds"
-        and !params.@"D --draw")) {
-        printDragon(
-            allocator,
-            stdout,
-            folds,
-            params.@"-d --direction",
-            params.@"-b --brush",
-            params.@"-x --scale",
-        ) catch |err| switch (err) {
-            error.Overflow, error.CanvasTooBig => {
-                std.log.err("drawing is too big", .{});
-                return;
-            },
-            else => return err
-        };
+    // Print the fractal drawing
+    switch (params.@"-s --style") {
+        .none => {},
+        .ascii, .blocks, .braille => |style| {
+            const canvas = drawDragon(
+                BinaryCanvas,
+                allocator,
+                folds,
+                params.@"-d --direction",
+                params.@"-x --scale",
+            ) catch |err| switch (err) {
+                error.Overflow, error.CanvasTooBig => {
+                    std.log.err("drawing is too big", .{});
+                    return;
+                },
+                else => return err
+            };
+
+            switch (style) {
+                .ascii => {
+                    canvas.asciiPrint(
+                        stdout,
+                        params.@"-b --brush",
+                    ) catch |err| switch (err) {
+                        error.InvalidBrush => {
+                            std.log.err(
+                                "invalid brush '{c}'",
+                                .{params.@"-b --brush"}
+                            );
+                            return;
+                        },
+                        else => return err
+                    };
+                },
+                .blocks => try canvas.blockyPrint(stdout),
+                .braille => try canvas.braillePrint(stdout),
+                else => unreachable
+            }
+        },
+        .arcs, .box, .doublebox, .heavybox => |style| {
+            const canvas = drawDragon(
+                JunctionCanvas,
+                allocator,
+                folds,
+                params.@"-d --direction",
+                params.@"-x --scale",
+            ) catch |err| switch (err) {
+                error.Overflow, error.CanvasTooBig => {
+                    std.log.err("drawing is too big", .{});
+                    return;
+                },
+                else => return err
+            };
+
+            switch (style) {
+                .arcs => try canvas.print(stdout, .arcs),
+                .box => try canvas.print(stdout, .light),
+                .doublebox => try canvas.print(stdout, .double),
+                .heavybox => try canvas.print(stdout, .heavy),
+                else => unreachable
+            }
+        },
     }
 }
