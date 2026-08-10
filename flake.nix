@@ -32,7 +32,7 @@
     in {
       default = pkgs.stdenv.mkDerivation {
         pname = "zigdragon";
-        version = "0.2";
+        version = "0.3";
         src = ./.;
         nativeBuildInputs = with pkgs; [ zig_0_16 ];
 

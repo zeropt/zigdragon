@@ -15,14 +15,15 @@ const help_message =
     \\zigdragon is a Heighway curve generator.
     \\
     \\Drawing Styles:
-    \\  none       no drawing
-    \\  arcs       utf-8 light box characters with rounded corners
-    \\  ascii      plain ascii using the [--brush] character
-    \\  blocks     utf-8 block element patterns
-    \\  box        (default) utf-8 light box drawing characters
-    \\  braille    utf-8 braille patterns
-    \\  doublebox  utf-8 double box drawing characters
-    \\  heavybox   utf-8 heavy box drawing characters
+    \\  none        no drawing
+    \\  arcs        utf-8 light box characters with rounded corners
+    \\  ascii       plain ascii using the [--brush] character
+    \\  box         (default) utf-8 light box drawing characters
+    \\  braille     utf-8 braille patterns
+    \\  doublebox   utf-8 double box drawing characters
+    \\  halfblocks  utf-8 half-blocks
+    \\  heavybox    utf-8 heavy box drawing characters
+    \\  quadrants   utf-8 block quadrants
     \\
     \\Options:
     \\  -f, --folds                 Print the sequence of folds
@@ -45,11 +46,12 @@ const DrawingStyle = enum {
     none,
     arcs,
     ascii,
-    blocks,
     box,
     braille,
     doublebox,
+    halfblocks,
     heavybox,
+    quadrants,
 };
 
 const Cardinal = enum(u2) {
@@ -417,8 +419,7 @@ const CanvasError = error { CanvasTooBig, InvalidBrush, OffCanvas };
 const BinaryCanvas = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
-    bwidth: usize,
-    bheight: usize,
+    bwidth: u32,
     width: u32,
     height: u32,
     x: u32 = 0,
@@ -435,17 +436,17 @@ const BinaryCanvas = struct {
         height: u32,
     ) !@This() {
         // Calculate the required bytes
-        const bwidth: usize = bwidth: {
-            var result: usize = width >> 1;
+        const bwidth: u32 = bwidth: {
+            var result: u32 = width >> 1;
             if (width & 1 > 0) result += 1;
             break :bwidth result;
         };
-        const bheight: usize = bheight: {
-            var result: usize = height >> 2;
+        const bheight: u32 = bheight: {
+            var result: u32 = height >> 2;
             if (height & 3 > 0) result += 1;
             break :bheight result;
         };
-        const size = try std.math.mul(usize, bwidth, bheight);
+        const size = try std.math.mul(u32, bwidth, bheight);
         if (size > canvas_limit) return CanvasError.CanvasTooBig;
 
         // Allocate bytes
@@ -459,7 +460,6 @@ const BinaryCanvas = struct {
             .allocator = allocator,
             .bytes = bytes,
             .bwidth = bwidth,
-            .bheight = bheight,
             .width = width,
             .height = height,
         };
@@ -478,8 +478,8 @@ const BinaryCanvas = struct {
         if (x >= self.width or y >= self.height) return CanvasError.OffCanvas;
         self.x = x;
         self.y = y;
-        const bx: usize = x >> 1;
-        const by: usize = y >> 2;
+        const bx: u32 = x >> 1;
+        const by: u32 = y >> 2;
         const shift_amt: u3 = @truncate((x & 1) + ((y & 3) << 1));
         self.bytes[bx + by * self.bwidth] |= @as(u8, 1) << shift_amt;
     }
@@ -511,7 +511,7 @@ const BinaryCanvas = struct {
         if (!std.ascii.isAscii(brush)) return CanvasError.InvalidBrush;
         if (self.bytes.len == 0) return;
         for (0..self.height) |y| {
-            const by: usize = y >> 2;
+            const by = y >> 2;
             var tile: u8 = undefined;
             for (0..self.width) |x| {
                 const bx = x >> 1;
@@ -542,8 +542,13 @@ const BinaryCanvas = struct {
     // Prints the canvas using unicode braille characters
     fn braillePrint(self: @This(), w: *std.Io.Writer) !void {
         if (self.bytes.len == 0) return;
+        const bheight: u32 = bheight: {
+            var result: u32 = self.height >> 2;
+            if (self.height & 3 > 0) result += 1;
+            break :bheight result;
+        };
         var character: [3]u8 = @splat(0);
-        for (0..self.bheight) |by| {
+        for (0..bheight) |by| {
             for (0..self.bwidth) |bx| {
                 _ = try std.unicode.utf8Encode(
                     utf8Braille(self.bytes[bx + by * self.bwidth]),
@@ -559,7 +564,7 @@ const BinaryCanvas = struct {
     // Converts canvas halftiles to UTF-8 block patterns
     // 0 1 <- halftile bits
     // 2 3
-    fn utf8Block(halftile: u4) u21 {
+    fn utf8Quadrants(halftile: u4) u21 {
         switch (halftile) {
             0b0000 => return ' ',    // empty
             0b0001 => return 0x2598, // quadrant upper left
@@ -580,31 +585,74 @@ const BinaryCanvas = struct {
         }
     }
 
-    // Prints the canvas using unicode block characters
-    fn blockyPrint(self: @This(), w: *std.Io.Writer) !void {
+    // Prints the canvas using unicode block quadrants
+    fn quadrantsPrint(self: @This(), w: *std.Io.Writer) !void {
         if (self.bytes.len == 0) return;
+        const cheight: u32 = cheight: {
+            var result: u32 = self.height >> 1;
+            if (self.height & 1 > 0) result += 1;
+            break :cheight result;
+        };
         var character: [3]u8 = @splat(0);
-        for (0..self.bheight) |by| {
-            // Print upper half
+        for (0..cheight) |cy| {
+            const by = cy >> 1;
             for (0..self.bwidth) |bx| {
-                const halftile: u4 = @truncate(
-                    self.bytes[bx + by * self.bwidth]
-                );
+                const halftile: u4 =
+                    if (cy & 1 == 0)
+                        @truncate(self.bytes[bx + by * self.bwidth])
+                    else
+                        @truncate(self.bytes[bx + by * self.bwidth] >> 4);
                 const length = try std.unicode.utf8Encode(
-                    utf8Block(halftile),
+                    utf8Quadrants(halftile),
                     &character,
                 );
                 try w.writeAll(character[0..length]);
             }
             try w.writeByte('\n');
+        }
+        try w.flush();
+    }
 
-            // Print lower half
-            for (0..self.bwidth) |bx| {
-                const halftile: u4 = @truncate(
-                    self.bytes[bx + by * self.bwidth] >> 4
-                );
+    // Converts canvas quartertiles to UTF-8 half-block patterns
+    // 0 <- quartertile bits
+    // 1
+    fn utf8Halfblocks(quartertile: u2) u21 {
+        switch (quartertile) {
+            0b00 => return ' ',    // empty
+            0b01 => return 0x2580, // upper half block
+            0b10 => return 0x2584, // lower half block
+            0b11 => return 0x2588, // full block
+        }
+    }
+
+    // Prints the canvas using unicode half-blocks
+    fn halfblocksPrint(self: @This(), w: *std.Io.Writer) !void {
+        if (self.bytes.len == 0) return;
+        const cheight: u32 = cheight: {
+            var result: u32 = self.height >> 1;
+            if (self.height & 1 > 0) result += 1;
+            break :cheight result;
+        };
+        var character: [3]u8 = @splat(0);
+        for (0..cheight) |cy| {
+            const by = cy >> 1;
+            var halftile: u4 = undefined;
+            for (0..self.width) |cx| {
+                const bx = cx >> 1;
+                if (cx & 1 == 0) {
+                    halftile = 
+                        if (cy & 1 == 0)
+                            @truncate(self.bytes[bx + by * self.bwidth])
+                        else
+                            @truncate(self.bytes[bx + by * self.bwidth] >> 4);
+                }
+                const quartertile: u2 = 
+                    if (cx & 1 == 0)
+                        @truncate(halftile & 1 | (halftile & 4) >> 1)
+                    else
+                        @truncate((halftile & 2) >> 1 | (halftile & 8) >> 2);
                 const length = try std.unicode.utf8Encode(
-                    utf8Block(halftile),
+                    utf8Halfblocks(quartertile),
                     &character,
                 );
                 try w.writeAll(character[0..length]);
@@ -829,19 +877,14 @@ const JunctionCanvas = struct {
         if (self.bytes.len == 0) return;
         var character: [3]u8 = @splat(0);
         for (0..self.height) |by| {
-            for (0..self.bwidth) |bx| {
-                const byte = self.bytes[bx + by * self.bwidth];
-
-                // First junction in the byte
-                var length = try std.unicode.utf8Encode(
-                    utf8Box(@truncate(byte), style),
-                    &character,
-                );
-                try w.writeAll(character[0..length]);
-
-                // Second junction in the byte
-                length = try std.unicode.utf8Encode(
-                    utf8Box(@truncate(byte >> 4), style),
+            var byte: u8 = undefined;
+            for (0..self.width) |x| {
+                const bx = x >> 1;
+                if (x & 1 == 0) byte = self.bytes[bx + by * self.bwidth];
+                const junction: u4 =
+                    if (x & 1 == 0) @truncate(byte) else @truncate(byte >> 4);
+                const length = try std.unicode.utf8Encode(
+                    utf8Box(junction, style),
                     &character,
                 );
                 try w.writeAll(character[0..length]);
@@ -974,7 +1017,7 @@ pub fn main(init: std.process.Init) !void {
     // Print the fractal drawing
     switch (params.@"-s --style") {
         .none => {},
-        .ascii, .blocks, .braille => |style| {
+        .ascii, .braille, .halfblocks, .quadrants => |style| {
             const canvas = drawDragon(
                 BinaryCanvas,
                 allocator,
@@ -1005,8 +1048,9 @@ pub fn main(init: std.process.Init) !void {
                         else => return err
                     };
                 },
-                .blocks => try canvas.blockyPrint(stdout),
                 .braille => try canvas.braillePrint(stdout),
+                .halfblocks => try canvas.halfblocksPrint(stdout),
+                .quadrants => try canvas.quadrantsPrint(stdout),
                 else => unreachable
             }
         },

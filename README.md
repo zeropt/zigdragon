@@ -24,14 +24,15 @@ Usage: zigdragon [-fm] [-s/--style <style>] [-n <iteration>]...
 zigdragon is a Heighway curve generator.
 
 Drawing Styles:
-  none       no drawing
-  arcs       utf-8 light box characters with rounded corners
-  ascii      plain ascii using the [--brush] character
-  blocks     utf-8 block element patterns
-  box        (default) utf-8 light box drawing characters
-  braille    utf-8 braille patterns
-  doublebox  utf-8 double box drawing characters
-  heavybox   utf-8 heavy box drawing characters
+  none        no drawing
+  arcs        utf-8 light box characters with rounded corners
+  ascii       plain ascii using the [--brush] character
+  box         (default) utf-8 light box drawing characters
+  braille     utf-8 braille patterns
+  doublebox   utf-8 double box drawing characters
+  halfblocks  utf-8 half-blocks
+  heavybox    utf-8 heavy box drawing characters
+  quadrants   utf-8 block quadrants
 
 Options:
   -f, --folds                 Print the sequence of folds
