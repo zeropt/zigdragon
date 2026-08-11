@@ -670,7 +670,7 @@ test BinaryCanvas {
     defer canvas.deinit();
 
     try std.testing.expectEqual(10, canvas.bwidth);
-    try std.testing.expectEqual(3, canvas.bheight);
+    try std.testing.expectEqual(30, canvas.bytes.len);
 
     var canvas2 = try BinaryCanvas.init(allocator, 4, 6);
     defer canvas2.deinit();
