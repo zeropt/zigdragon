@@ -40,8 +40,10 @@ const help_message =
     \\
 ;
 const n_limit = 23; // Limit the fractal to ~8M folds
-const canvas_limit = 16777216; // canvas limit in bytes
+const canvas_limit = 16_777_216; // canvas limit in bytes
 
+// Enum representing the fractal drawing styles
+// These field names are used to generate the valid CLI options
 const DrawingStyle = enum {
     none,
     arcs,
@@ -54,13 +56,14 @@ const DrawingStyle = enum {
     quadrants,
 };
 
+// Cardinal directions are useful for drawing and orienting the fractal
 const Cardinal = enum(u2) {
     east,
     north,
     west,
     south,
 
-    // Calculates the rotated the value (positive: E->N->W->S->E)
+    // Method that returns the rotated cardinal direction (positive: E->N->W->S->E)
     fn rotated(self: @This(), by: i32) @This() {
         var heading: u2 = @intFromEnum(self);
         heading +%= @as(u2, @intCast(@mod(by, 4)));
@@ -68,22 +71,23 @@ const Cardinal = enum(u2) {
     }
 };
 
-// Command line options
-// The name of each field is a template to compare args with
-// Single character names are for flags
+// CLI arguments are parsed using this struct's field names
+// Argument patterns are seperated by ' ', ',', '/' or '|'
+// Single characters without hyphens are used for parsing grouped flags (e.g. '-fm')
+// Each field needs a default value
 const Arguments = struct {
-    @"m --mirror": bool = false,
-    @"f --folds": bool = false,
+    @"f --folds": bool = false,           // print the sequence of folds
+    @"m --mirror": bool = false,          // generate a right instead of left-handed curve
     @"-s --style": DrawingStyle = .box,
-    @"-n": u32 = 10,
-    @"-x --scale": u32 = 1,
-    @"-b --brush": u8 = '#',
-    @"-d --direction": Cardinal = .south,
-    @"-h --help": bool = false,
+    @"-n": u32 = 10,                      // number of iterations the pattern is folded
+    @"-x --scale": u32 = 1,               // segment length between each fold
+    @"-d --direction": Cardinal = .south, // cardinal direction to start the curve with
+    @"-b --brush": u8 = '#',              // ascii character to draw with in 'ascii' style
+    @"-h --help": bool = false,           // show the help message
 };
 
-// Checks if the arg string is in the template string
-// Ignores patterns of length 1 since those are flags
+// Returns true if the captured CLI arg is in the template
+// Ignores single character patterns since those are for grouped flags
 fn argInTemplate(arg: []const u8, comptime template: []const u8) bool {
     if (template.len < 2) return false;
 
@@ -103,14 +107,14 @@ fn argInTemplate(arg: []const u8, comptime template: []const u8) bool {
             }
             if (c != arg[i]) matches = false;
             i += 1;
-        }
+        },
     };
     if (i == 1 or i < arg.len) matches = false;
 
     return matches;
 }
 
-// Checks if the flag is in the template string
+// Returns true if a character from a grouped flag is in the template
 fn flagInTemplate(flag: u8, comptime template: []const u8) bool {
     if (template.len == 0) return false;
 
@@ -127,22 +131,21 @@ fn flagInTemplate(flag: u8, comptime template: []const u8) bool {
                 if (c == flag) matches = true;
                 first_character = false;
             } else matches = false;
-        }
+        },
     };
 
     return matches;
 }
 
-test "argInTemplate, flagInTemplate functions" {
+test "argInTemplate, flagInTemplate" {
     try std.testing.expect(argInTemplate("-n", "-n"));
     try std.testing.expect(!argInTemplate("n", "-n"));
-
     try std.testing.expect(argInTemplate("-x", "-x --scale"));
     try std.testing.expect(argInTemplate("--scale", "-x --scale"));
     try std.testing.expect(!argInTemplate("--x", "-x --scale"));
 
+    // Grouped flags
     try std.testing.expect(!argInTemplate("r", "r --right"));
-
     try std.testing.expect(flagInTemplate('r', "r --right"));
     try std.testing.expect(flagInTemplate('r', "--right r"));
     try std.testing.expect(!flagInTemplate('n', "--right r"));
@@ -151,6 +154,8 @@ test "argInTemplate, flagInTemplate functions" {
 
 const ArgsError = error { InvalidArgument };
 
+// Returns an instance of Arguments populated with values parsed from an argument slice
+// Reflects on `Arguments` and `DrawingStyle` structs
 fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
     var results: Arguments = .{};
 
@@ -166,7 +171,7 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                 // Bools simply get set to true
                 if (field.type == bool) {
                     @field(results, field.name) = true;
-                    continue :argloop;
+                    continue :argloop; // argument successfully handled
                 }
 
                 // Other types read the following argument as the parameter
@@ -177,11 +182,10 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                 }
                 const val = args[args_i];
 
-                // Currently implemented parameter types:
-                // u8, u32, i32, DrawingStyle Cardinal
+                // Set the value of the matching field
+                // Parsed based on type
                 @field(results, field.name) = switch (field.type) {
-                    u8 => if (val.len == 1) val[0]
-                        else ArgsError.InvalidArgument,
+                    u8 => if (val.len == 1) val[0] else ArgsError.InvalidArgument,
                     u32, i32 => std.fmt.parseInt(field.type, val, 10),
                     DrawingStyle => asdrawingstyle: {
                         const styles = @typeInfo(DrawingStyle).@"enum".fields;
@@ -197,17 +201,13 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                     },
                     Cardinal => ascardinal: {
                         const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
-                        if (eqlIgnoreCase(val, "w") or
-                            eqlIgnoreCase(val, "west")) {
+                        if (eqlIgnoreCase(val, "w") or eqlIgnoreCase(val, "west")) {
                             break :ascardinal Cardinal.west;
-                        } else if (eqlIgnoreCase(val, "e") or
-                            eqlIgnoreCase(val, "east")) {
+                        } else if (eqlIgnoreCase(val, "e") or eqlIgnoreCase(val, "east")) {
                             break :ascardinal Cardinal.east;
-                        } else if (eqlIgnoreCase(val, "n") or
-                            eqlIgnoreCase(val, "north")) {
+                        } else if (eqlIgnoreCase(val, "n") or eqlIgnoreCase(val, "north")) {
                             break :ascardinal Cardinal.north;
-                        } else if (eqlIgnoreCase(val, "s") or
-                            eqlIgnoreCase(val, "south")) {
+                        } else if (eqlIgnoreCase(val, "s") or eqlIgnoreCase(val, "south")) {
                             break :ascardinal Cardinal.south;
                         } else {
                             break :ascardinal ArgsError.InvalidArgument;
@@ -216,13 +216,13 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                     else => {
                         @compileLog(field.type);
                         @compileError("unimplemented arg type");
-                    }
+                    },
                 } catch {
                     std.log.err("invalid value {s} '{s}'", .{arg, val});
                     return ArgsError.InvalidArgument;
                 };
 
-                continue :argloop;
+                continue :argloop; // argument successfully handled
             }
         }
 
@@ -235,7 +235,7 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                         if (flagInTemplate(flag, field.name)) {
                             if (field.type == bool) {
                                 @field(results, field.name) = true;
-                                continue :flagloop;
+                                continue :flagloop; // flag successfully handled
                             }
                         }
                     }
@@ -245,11 +245,11 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                     return ArgsError.InvalidArgument;
                 }
 
-                continue :argloop;
+                continue :argloop; // argument successfully handled
             }
         }
 
-        // If nothing matched, it's an invalid argument
+        // If not handled, it's an invalid argument
         std.log.err("unknown option '{s}'", .{arg});
         return ArgsError.InvalidArgument;
     }
@@ -257,6 +257,7 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
     return results;
 }
 
+// Heighway curves are made of folds
 const Fold = enum(u1) {
     left,
     right,
@@ -268,13 +269,13 @@ const Fold = enum(u1) {
 
 const FoldsError = error { ExceedsLimit, OutOfMemory };
 
+// Structure for representing a sequence of folds in an array of bytes: 8 folds per byte
 const Folds = struct {
     allocator: std.mem.Allocator,
     data: []const u8,
     len: usize,
-    index: usize = 0,
-    reader: u8 = 0,
 
+    // Allocates and returns the folds of a heighway curve
     fn generate(allocator: std.mem.Allocator, n: u32, hand: Fold) !@This() {
         if (n > n_limit) return FoldsError.ExceedsLimit;
 
@@ -290,7 +291,6 @@ const Folds = struct {
             break :data_len result;
         };
         var data: []u8 = try allocator.alloc(u8, data_len);
-        // if further errors are possible: errdefer allocator.free(data);
 
         // Initialize the bytes as zeroes
         for (data, 0..) |_, i| data[i] = 0;
@@ -343,16 +343,19 @@ const Folds = struct {
             .left => try w.writeAll("L"),
             .right => try w.writeAll("R"),
         };
-        try w.writeAll("\n");
+        try w.writeByte('\n');
         try w.flush();
     }
 };
 
+// Structure for iterating through each Fold in an instance of Folds
 const FoldsIterator = struct {
     folds: *const Folds,
     index: usize = 0,
     reader: u8 = 0,
 
+    // Returns a Fold and increments the index
+    // Returns null when the end is reached
     fn next(self: *@This()) ?Fold {
         if (self.index >= self.folds.len) return null;
         if (self.index & 7 == 0) self.reader = self.folds.data[self.index >> 3];
@@ -374,6 +377,7 @@ test Folds {
     defer folds.deinit();
 }
 
+// Structure used to measure the bounding box of the heighway curve
 const Envelope = struct {
     l: u32 = 0,
     r: u32 = 0,
@@ -392,12 +396,10 @@ const Envelope = struct {
                     self.x -= 1;
                 }
             },
-
             .east => {
                 self.x += 1;
                 if (self.x == self.l + self.r + 1) self.r += 1;
             },
-
             .north => {
                 if (self.y == 0) {
                     self.t += 1;
@@ -405,7 +407,6 @@ const Envelope = struct {
                     self.y -= 1;
                 }
             },
-
             .south => {
                 self.y += 1;
                 if (self.y == self.t + self.b + 1) self.b += 1;
@@ -414,8 +415,17 @@ const Envelope = struct {
     }
 };
 
-const CanvasError = error { CanvasTooBig, InvalidBrush, OffCanvas };
+const CanvasError = error {
+    CanvasTooBig,
+    InvalidBrush,
+    OffCanvas,
+};
 
+// The following canvas structures are used to draw the fractal on a grid of cells
+// Each have init, deinit, placeBrush, and moveBrush methods
+// Their printing methods vary
+
+// Canvas structure where each cell is either on or off
 const BinaryCanvas = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
@@ -430,11 +440,7 @@ const BinaryCanvas = struct {
     // 2 3
     // 4 5
     // 6 7
-    fn init(
-        allocator: std.mem.Allocator,
-        width: u32,
-        height: u32,
-    ) !@This() {
+    fn init(allocator: std.mem.Allocator, width: u32, height: u32) !@This() {
         // Calculate the required bytes
         const bwidth: u32 = bwidth: {
             var result: u32 = width >> 1;
@@ -470,11 +476,7 @@ const BinaryCanvas = struct {
     }
 
     // Sets x, y and draws at that point
-    fn placeBrush(
-        self: *@This(),
-        x: u32,
-        y: u32,
-    ) CanvasError!void {
+    fn placeBrush(self: *@This(), x: u32, y: u32) CanvasError!void {
         if (x >= self.width or y >= self.height) return CanvasError.OffCanvas;
         self.x = x;
         self.y = y;
@@ -485,11 +487,7 @@ const BinaryCanvas = struct {
     }
 
     // Moves the brush along a cardinal direction while drawing
-    fn moveBrush(
-        self: *@This(),
-        heading: Cardinal,
-        distance: u32,
-    ) CanvasError!void {
+    fn moveBrush(self: *@This(), heading: Cardinal, distance: u32) CanvasError!void {
         for (0..distance) |_| {
             switch (heading) {
                 .west => {
@@ -598,14 +596,9 @@ const BinaryCanvas = struct {
             const by = cy >> 1;
             for (0..self.bwidth) |bx| {
                 const halftile: u4 =
-                    if (cy & 1 == 0)
-                        @truncate(self.bytes[bx + by * self.bwidth])
-                    else
-                        @truncate(self.bytes[bx + by * self.bwidth] >> 4);
-                const length = try std.unicode.utf8Encode(
-                    utf8Quadrants(halftile),
-                    &character,
-                );
+                    if (cy & 1 == 0) @truncate(self.bytes[bx + by * self.bwidth])
+                    else @truncate(self.bytes[bx + by * self.bwidth] >> 4);
+                const length = try std.unicode.utf8Encode(utf8Quadrants(halftile), &character);
                 try w.writeAll(character[0..length]);
             }
             try w.writeByte('\n');
@@ -641,20 +634,13 @@ const BinaryCanvas = struct {
                 const bx = cx >> 1;
                 if (cx & 1 == 0) {
                     halftile = 
-                        if (cy & 1 == 0)
-                            @truncate(self.bytes[bx + by * self.bwidth])
-                        else
-                            @truncate(self.bytes[bx + by * self.bwidth] >> 4);
+                        if (cy & 1 == 0) @truncate(self.bytes[bx + by * self.bwidth])
+                        else @truncate(self.bytes[bx + by * self.bwidth] >> 4);
                 }
                 const quartertile: u2 = 
-                    if (cx & 1 == 0)
-                        @truncate(halftile & 1 | (halftile & 4) >> 1)
-                    else
-                        @truncate((halftile & 2) >> 1 | (halftile & 8) >> 2);
-                const length = try std.unicode.utf8Encode(
-                    utf8Halfblocks(quartertile),
-                    &character,
-                );
+                    if (cx & 1 == 0) @truncate(halftile & 1 | (halftile & 4) >> 1)
+                    else @truncate((halftile & 2) >> 1 | (halftile & 8) >> 2);
+                const length = try std.unicode.utf8Encode(utf8Halfblocks(quartertile), &character);
                 try w.writeAll(character[0..length]);
             }
             try w.writeByte('\n');
@@ -688,6 +674,7 @@ test BinaryCanvas {
     try std.testing.expectEqual(0b0000_1110, canvas2.bytes[3]);
 }
 
+// Canvas structure where each cell is a junction between its four headings: up, down, left, right
 const JunctionCanvas = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
@@ -701,11 +688,7 @@ const JunctionCanvas = struct {
     // |  1  |  5  | <- Each u8 represents two adjacent junctions
     // |2   0|6   4|
     // |  3  |  7  |
-    fn init(
-        allocator: std.mem.Allocator,
-        width: u32,
-        height: u32,
-    ) !@This() {
+    fn init(allocator: std.mem.Allocator, width: u32, height: u32) !@This() {
         // Calculate the required bytes
         const bwidth: u32 = bwidth: {
             var result: u32 = width >> 1;
@@ -736,22 +719,14 @@ const JunctionCanvas = struct {
     }
 
     // Sets the brush x, y
-    fn placeBrush(
-        self: *@This(),
-        x: u32,
-        y: u32,
-    ) CanvasError!void {
+    fn placeBrush(self: *@This(), x: u32, y: u32) CanvasError!void {
         if (x >= self.width or y >= self.height) return CanvasError.OffCanvas;
         self.x = x;
         self.y = y;
     }
 
     // Moves the brush along a cardinal direction while drawing
-    fn moveBrush(
-        self: *@This(),
-        heading: Cardinal,
-        distance: u32,
-    ) CanvasError!void {
+    fn moveBrush(self: *@This(), heading: Cardinal, distance: u32) CanvasError!void {
         var bx: u32 = self.x >> 1;
         for (0..distance) |_| {
             // Update leaving junction
@@ -784,6 +759,7 @@ const JunctionCanvas = struct {
         }
     }
 
+    // Unicode box drawing character styles
     const BoxStyle = enum {
         light,
         heavy,
@@ -881,12 +857,8 @@ const JunctionCanvas = struct {
             for (0..self.width) |x| {
                 const bx = x >> 1;
                 if (x & 1 == 0) byte = self.bytes[bx + by * self.bwidth];
-                const junction: u4 =
-                    if (x & 1 == 0) @truncate(byte) else @truncate(byte >> 4);
-                const length = try std.unicode.utf8Encode(
-                    utf8Box(junction, style),
-                    &character,
-                );
+                const junction: u4 = if (x & 1 == 0) @truncate(byte) else @truncate(byte >> 4);
+                const length = try std.unicode.utf8Encode(utf8Box(junction, style), &character);
                 try w.writeAll(character[0..length]);
             }
             try w.writeByte('\n');
@@ -914,6 +886,7 @@ test JunctionCanvas {
     try std.testing.expectEqual(0b0110_0011, canvas.bytes[2]);
 }
 
+// Returns an allocated canvas with the curve drawn on it
 fn drawDragon(
     comptime CanvasT: type,
     allocator: std.mem.Allocator,
@@ -954,10 +927,7 @@ fn drawDragon(
     errdefer canvas.deinit();
 
     // Draw the fractal
-    try canvas.placeBrush(
-        segment_length * envelope.l,
-        segment_length * envelope.t,
-    );
+    try canvas.placeBrush(segment_length * envelope.l, segment_length * envelope.t);
     heading = starting_direction;
     try canvas.moveBrush(heading, segment_length);
     it.reset();
@@ -983,9 +953,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Parse Arguments
     const args = try init.minimal.args.toSlice(allocator);
-    const params: Arguments = parseArgsSlice(args[1..]) catch .{
-        .@"-h --help"=true
-    };
+    const params: Arguments = parseArgsSlice(args[1..]) catch .{ .@"-h --help"=true };
     if (params.@"-h --help") {
         try stdout.writeAll(help_message);
         try stdout.flush();
@@ -1005,7 +973,7 @@ pub fn main(init: std.process.Init) !void {
             );
             return;
         },
-        else => return err
+        else => return err,
     };
 
     // Print fold sequence
@@ -1017,6 +985,8 @@ pub fn main(init: std.process.Init) !void {
     // Print the fractal drawing
     switch (params.@"-s --style") {
         .none => {},
+
+        // Styles that use a BinaryCanvas
         .ascii, .braille, .halfblocks, .quadrants => |style| {
             const canvas = drawDragon(
                 BinaryCanvas,
@@ -1029,31 +999,28 @@ pub fn main(init: std.process.Init) !void {
                     std.log.err("drawing is too big", .{});
                     return;
                 },
-                else => return err
+                else => return err,
             };
 
+            // Print the canvas
             switch (style) {
-                .ascii => {
-                    canvas.asciiPrint(
-                        stdout,
-                        params.@"-b --brush",
-                    ) catch |err| switch (err) {
+                .ascii => canvas.asciiPrint(stdout, params.@"-b --brush") catch |err| {
+                    switch (err) {
                         error.InvalidBrush => {
-                            std.log.err(
-                                "invalid brush '{c}'",
-                                .{params.@"-b --brush"}
-                            );
+                            std.log.err("invalid brush '{c}'", .{params.@"-b --brush"});
                             return;
                         },
-                        else => return err
-                    };
+                        else => return err,
+                    }
                 },
                 .braille => try canvas.braillePrint(stdout),
                 .halfblocks => try canvas.halfblocksPrint(stdout),
                 .quadrants => try canvas.quadrantsPrint(stdout),
-                else => unreachable
+                else => unreachable,
             }
         },
+
+        // Styles that use a JunctionCanvas
         .arcs, .box, .doublebox, .heavybox => |style| {
             const canvas = drawDragon(
                 JunctionCanvas,
@@ -1066,15 +1033,16 @@ pub fn main(init: std.process.Init) !void {
                     std.log.err("drawing is too big", .{});
                     return;
                 },
-                else => return err
+                else => return err,
             };
 
+            // Print the canvas
             switch (style) {
                 .arcs => try canvas.print(stdout, .arcs),
                 .box => try canvas.print(stdout, .light),
                 .doublebox => try canvas.print(stdout, .double),
                 .heavybox => try canvas.print(stdout, .heavy),
-                else => unreachable
+                else => unreachable,
             }
         },
     }
