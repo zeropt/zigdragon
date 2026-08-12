@@ -1,20 +1,75 @@
 # zigdragon
 
-`zigdragon` is a Heighway curve generator, written in `Zig`. I wrote this as a fun exercise after completing the Ziglings course.
+`zigdragon` is a command-line Heighway curve generator, written in `Zig`. I wrote this as a fun exercise after completing [Ziglings](https://codeberg.org/ziglings/exercises).
 
 ![zigdragon example](img/example.png)
 
-## Build
+## Building from source
 
-Built using [Zig](https://codeberg.org/ziglang/zig) version `0.16.0`
+Make sure you have [Zig](https://codeberg.org/ziglang/zig) version `0.16.0` is installed.
 
-Download the source and run:
+```
+git clone https://github.com/zeropt/zigdragon.git
+cd zigdragon
+zig build-exe zigdragon.zig -O ReleaseSmall -fstrip -fsingle-threaded
+```
 
-`zig build-exe zigdragon.zig -O ReleaseSmall -fstrip -fsingle-threaded`
+## Building with Nix commands
 
-Or using the Nix flake:
+On systems with Nix installed and Nix commands enabled, you can use the following commands.
+
+To build a binary:
 
 `nix build github:zeropt/zigdragon`
+
+To run without installing:
+
+`nix run github:zeropt/zigdragon`
+
+To enter a temporary shell with `zigdragon` installed:
+
+`nix shell github:zeropt/zigdragon`
+
+To install to a Nix profile:
+
+`nix profile add github:zeropt/zigdragon`
+
+## Installing on NixOS using flakes
+
+```nix
+# flake.nix
+{
+  description = "Example NixOS flake";
+
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    zigdragon = {
+      url = "github:zeropt/zigdragon";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, ... }@inputs: {
+    nixosConfigurations.your-hostname = nixpkgs.lib.nixosSystem rec {
+      system = "x86_64-linux";
+
+      specialArgs = { inherit inputs system; };
+
+      modules = [
+        ./configuration.nix
+        (
+          { pkgs, system, ... }:
+          {
+            environment.systemPackages = [
+              inputs.zigdragon.packages.${system}.default
+            ];
+          }
+        )
+      ];
+    };
+  };
+}
+```
 
 ## Usage
 
