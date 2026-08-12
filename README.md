@@ -6,7 +6,7 @@
 
 ## Building from source
 
-Make sure you have [Zig](https://codeberg.org/ziglang/zig) version `0.16.0` is installed.
+Make sure you have [Zig](https://codeberg.org/ziglang/zig) version `0.16.0` installed.
 
 ```
 git clone https://github.com/zeropt/zigdragon.git
@@ -16,7 +16,7 @@ zig build-exe zigdragon.zig -O ReleaseSmall -fstrip -fsingle-threaded
 
 ## Building with Nix commands
 
-On systems with Nix installed and Nix commands enabled, you can use the following commands.
+On systems with Nix installed and Nix commands enabled you can use the following commands.
 
 To build a binary:
 
