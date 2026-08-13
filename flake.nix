@@ -16,7 +16,9 @@
       pkgs = pkgsFor.${system};
     in {
       default = pkgs.mkShell {
-        buildInputs = with pkgs; [ zig_0_16 ];
+        buildInputs = with pkgs; [
+          zig_0_16
+        ];
 
         shellHook = ''
           echo "Using zigdragon devShell!"
@@ -29,12 +31,14 @@
     packages = forAllSystems (system:
     let
       pkgs = pkgsFor.${system};
-    in {
-      default = pkgs.stdenv.mkDerivation {
+    in rec {
+      zigdragon = pkgs.stdenv.mkDerivation {
         pname = "zigdragon";
         version = "0.3";
         src = ./.;
-        nativeBuildInputs = with pkgs; [ zig_0_16 ];
+        nativeBuildInputs = with pkgs; [
+          zig_0_16
+        ];
 
         buildPhase = ''
           zig build-exe zigdragon.zig \
@@ -48,6 +52,8 @@
           cp zigdragon $out/bin
         '';
       };
+
+      default = zigdragon;
     });
   };
 }

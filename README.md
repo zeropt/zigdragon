@@ -1,6 +1,6 @@
 # zigdragon
 
-`zigdragon` is a command-line Heighway curve generator, written in `Zig`. I wrote this as a fun exercise after completing [Ziglings](https://codeberg.org/ziglings/exercises).
+`zigdragon` is a command-line Heighway curve generator, written in Zig. I wrote this as a fun exercise after completing [Ziglings](https://codeberg.org/ziglings/exercises).
 
 ![zigdragon example](img/example.png)
 
@@ -61,7 +61,7 @@ To install to a Nix profile:
           { pkgs, system, ... }:
           {
             environment.systemPackages = [
-              inputs.zigdragon.packages.${system}.default
+              inputs.zigdragon.packages.${system}.zigdragon
             ];
           }
         )
