@@ -71,158 +71,109 @@ const Cardinal = enum(u2) {
     }
 };
 
-// CLI arguments are parsed using this struct's field names
-// Argument patterns are seperated by ' ', ',', '/' or '|'
-// Single characters without hyphens are used for parsing grouped flags (e.g. '-fm')
-// Each field needs a default value
-const Arguments = struct {
-    @"f --folds": bool = false,           // print the sequence of folds
-    @"m --mirror": bool = false,          // generate a right instead of left-handed curve
-    @"-s --style": DrawingStyle = .box,
-    @"-n": u32 = 10,                      // number of iterations the pattern is folded
-    @"-x --scale": u32 = 1,               // segment length between each fold
-    @"-d --direction": Cardinal = .south, // cardinal direction to start the curve with
-    @"-b --brush": u8 = '#',              // ascii character to draw with in 'ascii' style
-    @"-h --help": bool = false,           // show the help message
+// Structure for values that get parsed from the command-line arguments
+const Parameters = struct {
+    folds: bool = false,          // print the sequence of folds
+    mirror: bool = false,         // generate a right instead of left-handed curve
+    style: DrawingStyle = .box,
+    n: u32 = 10,                  // number of iterations the pattern is folded
+    scale: u32 = 1,               // segment length between each fold
+    direction: Cardinal = .south, // cardinal direction to start the curve with
+    brush: u8 = '#',              // ascii character to draw with in 'ascii' style
+    help: bool = false,           // show the help message
 };
 
-// Returns true if the captured CLI arg is in the template
-// Ignores single character patterns since those are for grouped flags
-fn argInTemplate(arg: []const u8, comptime template: []const u8) bool {
-    if (template.len < 2) return false;
-
-    var matches: bool = true;
-    var i: usize = 0;
-    for (template) |c| switch (c) {
-        ' ', ',', '/', '|' => {
-            if (matches) break;
-            matches = true;
-            i = 0;
-        },
-        else => {
-            if (!matches) continue;
-            if (i >= arg.len) {
-                matches = false;
-                continue;
-            }
-            if (c != arg[i]) matches = false;
-            i += 1;
-        },
-    };
-    if (i == 1 or i < arg.len) matches = false;
-
-    return matches;
-}
-
-// Returns true if a character from a grouped flag is in the template
-fn flagInTemplate(flag: u8, comptime template: []const u8) bool {
-    if (template.len == 0) return false;
-
-    var first_character: bool = true;
-    var matches: bool = false;
-    for (template) |c| switch (c) {
-        ' ', ',', '/', '|' => {
-            if (matches) break;
-            first_character = true;
-            matches = false;
-        },
-        else => {
-            if (first_character) {
-                if (c == flag) matches = true;
-                first_character = false;
-            } else matches = false;
-        },
-    };
-
-    return matches;
-}
-
-test "argInTemplate, flagInTemplate" {
-    try std.testing.expect(argInTemplate("-n", "-n"));
-    try std.testing.expect(!argInTemplate("n", "-n"));
-    try std.testing.expect(argInTemplate("-x", "-x --scale"));
-    try std.testing.expect(argInTemplate("--scale", "-x --scale"));
-    try std.testing.expect(!argInTemplate("--x", "-x --scale"));
-
-    // Grouped flags
-    try std.testing.expect(!argInTemplate("r", "r --right"));
-    try std.testing.expect(flagInTemplate('r', "r --right"));
-    try std.testing.expect(flagInTemplate('r', "--right r"));
-    try std.testing.expect(!flagInTemplate('n', "--right r"));
-    try std.testing.expect(!flagInTemplate('r', "--right rar"));
-}
+// Comptime struct literal for parsing command-line options
+// Each fields should correspond to a field in Parameters
+// Keys are for matching standalone options
+// Flag characters are for parsing grouped flags e.g. `-fm`
+const cli_options = .{
+    .folds = .{ .keys=.{ "--folds" },  .flag='f' },
+    .mirror = .{ .keys=.{ "--mirror" }, .flag='m' },
+    .style  = .{ .keys=.{ "-s", "--style" } },
+    .n = .{ .keys=.{ "-n" } },
+    .scale = .{ .keys=.{ "-x", "--scale" } },
+    .direction = .{ .keys=.{ "-d", "--direction" } },
+    .brush = .{ .keys=.{ "-b", "--brush" } },
+    .help = .{ .keys=.{ "-h", "--help" } },
+};
 
 const ArgsError = error { InvalidArgument };
 
-// Returns an instance of Arguments populated with values parsed from an argument slice
-// Reflects on `Arguments` and `DrawingStyle` structs
-fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
-    var results: Arguments = .{};
+// Returns an instance of Parameters populated with values parsed from an Args Iterator
+// Reflects on `Parameters`, `cli_options`, and `DrawingStyle` structs
+fn parseArguments(it: *std.process.Args.Iterator) ArgsError!Parameters {
+    var results: Parameters = .{};
+
+    // Skip the first argument which is the command itself
+    _ = it.skip();
 
     // Loop through and parse each argument
-    const templates = @typeInfo(Arguments).@"struct".fields;
-    var args_i: usize = 0;
-    argloop: while (args_i < args.len) : (args_i += 1) {
-        const arg = args[args_i];
+    argloop: while (it.next()) |arg| {
+        const fields = @typeInfo(@TypeOf(cli_options)).@"struct".fields;
 
-        // Handle args that match templates
-        inline for (templates) |field| {
-            if (argInTemplate(arg, field.name)) {
-                // Bools simply get set to true
-                if (field.type == bool) {
-                    @field(results, field.name) = true;
-                    continue :argloop; // argument successfully handled
-                }
-
-                // Other types read the following argument as the parameter
-                args_i += 1;
-                if (args_i >= args.len) {
-                    std.log.err("missing value for {s}", .{arg});
-                    return ArgsError.InvalidArgument;
-                }
-                const val = args[args_i];
-
-                // Set the value of the matching field
-                // Parsed based on type
-                @field(results, field.name) = switch (field.type) {
-                    u8 => if (val.len == 1) val[0] else ArgsError.InvalidArgument,
-                    u32, i32 => std.fmt.parseInt(field.type, val, 10),
-                    DrawingStyle => asdrawingstyle: {
-                        const styles = @typeInfo(DrawingStyle).@"enum".fields;
-                        inline for (styles) |style| {
-                            if (std.ascii.eqlIgnoreCase(val, style.name)) {
-                                break :asdrawingstyle @as(
-                                    DrawingStyle,
-                                    @enumFromInt(style.value),
-                                );
-                            }
+        // Handle standalone arguments
+        inline for (fields) |field| {
+            const option = @field(cli_options, field.name);
+            const param_type = @FieldType(Parameters, field.name);
+            if (@hasField(@TypeOf(option), "keys")) {
+                inline for (option.keys) |key| {
+                    if (std.mem.eql(u8, arg, key)) {
+                        // Bools get set to true
+                        if (param_type == bool) {
+                            @field(results, field.name) = true;
+                            continue :argloop; // argument successfully handled
                         }
-                        break :asdrawingstyle ArgsError.InvalidArgument;
-                    },
-                    Cardinal => ascardinal: {
-                        const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
-                        if (eqlIgnoreCase(val, "w") or eqlIgnoreCase(val, "west")) {
-                            break :ascardinal Cardinal.west;
-                        } else if (eqlIgnoreCase(val, "e") or eqlIgnoreCase(val, "east")) {
-                            break :ascardinal Cardinal.east;
-                        } else if (eqlIgnoreCase(val, "n") or eqlIgnoreCase(val, "north")) {
-                            break :ascardinal Cardinal.north;
-                        } else if (eqlIgnoreCase(val, "s") or eqlIgnoreCase(val, "south")) {
-                            break :ascardinal Cardinal.south;
-                        } else {
-                            break :ascardinal ArgsError.InvalidArgument;
-                        }
-                    },
-                    else => {
-                        @compileLog(field.type);
-                        @compileError("unimplemented arg type");
-                    },
-                } catch {
-                    std.log.err("invalid value {s} '{s}'", .{arg, val});
-                    return ArgsError.InvalidArgument;
-                };
 
-                continue :argloop; // argument successfully handled
+                        // Other types read the following argument as the parameter
+                        const val = it.next() orelse {
+                            std.log.err("missing value for {s}", .{arg});
+                            return ArgsError.InvalidArgument;
+                        };
+
+                        // Set the value of the matching field
+                        // Parsed based on type
+                        @field(results, field.name) = switch (param_type) {
+                            u8 => if (val.len == 1) val[0] else ArgsError.InvalidArgument,
+                            u32, i32 => std.fmt.parseInt(param_type, val, 10),
+                            DrawingStyle => asdrawingstyle: {
+                                const styles = @typeInfo(DrawingStyle).@"enum".fields;
+                                inline for (styles) |style| {
+                                    if (std.ascii.eqlIgnoreCase(val, style.name)) {
+                                        break :asdrawingstyle @as(
+                                            DrawingStyle,
+                                            @enumFromInt(style.value),
+                                        );
+                                    }
+                                }
+                                break :asdrawingstyle ArgsError.InvalidArgument;
+                            },
+                            Cardinal => ascardinal: {
+                                const eqlIgnoreCase = std.ascii.eqlIgnoreCase;
+                                if (eqlIgnoreCase(val, "w") or eqlIgnoreCase(val, "west")) {
+                                    break :ascardinal Cardinal.west;
+                                } else if (eqlIgnoreCase(val, "e") or eqlIgnoreCase(val, "east")) {
+                                    break :ascardinal Cardinal.east;
+                                } else if (eqlIgnoreCase(val, "n") or eqlIgnoreCase(val, "north")) {
+                                    break :ascardinal Cardinal.north;
+                                } else if (eqlIgnoreCase(val, "s") or eqlIgnoreCase(val, "south")) {
+                                    break :ascardinal Cardinal.south;
+                                } else {
+                                    break :ascardinal ArgsError.InvalidArgument;
+                                }
+                            },
+                            else => {
+                                @compileLog(param_type);
+                                @compileError("unimplemented arg type");
+                            },
+                        } catch {
+                            std.log.err("invalid value {s} '{s}'", .{arg, val});
+                            return ArgsError.InvalidArgument;
+                        };
+
+                        continue :argloop; // argument successfully handled
+                    }
+                }
             }
         }
 
@@ -231,11 +182,14 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
             if (arg[0] == '-' and arg[1] != '-') {
                 flagloop: for (arg[1..]) |flag| {
                     // Set matching template value to true
-                    inline for (templates) |field| {
-                        if (flagInTemplate(flag, field.name)) {
-                            if (field.type == bool) {
-                                @field(results, field.name) = true;
-                                continue :flagloop; // flag successfully handled
+                    inline for (fields) |field| {
+                        const option = @field(cli_options, field.name);
+                        if (@hasField(@TypeOf(option), "flag")) {
+                            if (option.flag == flag) {
+                                if (@FieldType(Parameters, field.name) == bool) {
+                                    @field(results, field.name) = true;
+                                    continue :flagloop; // flag successfully handled
+                                }
                             }
                         }
                     }
@@ -244,7 +198,6 @@ fn parseArgsSlice(args: []const [:0]const u8) ArgsError!Arguments {
                     std.log.err("unknown flag '{c}' in '{s}'", .{flag, arg});
                     return ArgsError.InvalidArgument;
                 }
-
                 continue :argloop; // argument successfully handled
             }
         }
@@ -952,9 +905,9 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_fw.interface;
 
     // Parse Arguments
-    const args = try init.minimal.args.toSlice(allocator);
-    const params: Arguments = parseArgsSlice(args[1..]) catch .{ .@"-h --help"=true };
-    if (params.@"-h --help") {
+    var args_it = try init.minimal.args.iterateAllocator(allocator);
+    const params: Parameters = parseArguments(&args_it) catch .{ .help=true };
+    if (params.help) {
         try stdout.writeAll(help_message);
         try stdout.flush();
         return;
@@ -963,13 +916,13 @@ pub fn main(init: std.process.Init) !void {
     // Generate folds
     const folds = Folds.generate(
         allocator,
-        params.@"-n",
-        if (params.@"m --mirror") .right else .left,
+        params.n,
+        if (params.mirror) .right else .left,
     ) catch |err| switch (err) {
         error.ExceedsLimit => {
             std.log.err(
                 "exceeded iteration limit {} > {}",
-                .{params.@"-n", n_limit}
+                .{params.n, n_limit}
             );
             return;
         },
@@ -977,13 +930,13 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Print fold sequence
-    if (params.@"f --folds") {
+    if (params.folds) {
         try folds.print(stdout);
-        if (params.@"-s --style" != .none) try stdout.writeAll("\n");
+        if (params.style != .none) try stdout.writeAll("\n");
     }
 
     // Print the fractal drawing
-    switch (params.@"-s --style") {
+    switch (params.style) {
         .none => {},
 
         // Styles that use a BinaryCanvas
@@ -992,8 +945,8 @@ pub fn main(init: std.process.Init) !void {
                 BinaryCanvas,
                 allocator,
                 folds,
-                params.@"-d --direction",
-                params.@"-x --scale",
+                params.direction,
+                params.scale,
             ) catch |err| switch (err) {
                 error.Overflow, error.CanvasTooBig => {
                     std.log.err("drawing is too big", .{});
@@ -1004,10 +957,10 @@ pub fn main(init: std.process.Init) !void {
 
             // Print the canvas
             switch (style) {
-                .ascii => canvas.asciiPrint(stdout, params.@"-b --brush") catch |err| {
+                .ascii => canvas.asciiPrint(stdout, params.brush) catch |err| {
                     switch (err) {
                         error.InvalidBrush => {
-                            std.log.err("invalid brush '{c}'", .{params.@"-b --brush"});
+                            std.log.err("invalid brush '{c}'", .{params.brush});
                             return;
                         },
                         else => return err,
@@ -1026,8 +979,8 @@ pub fn main(init: std.process.Init) !void {
                 JunctionCanvas,
                 allocator,
                 folds,
-                params.@"-d --direction",
-                params.@"-x --scale",
+                params.direction,
+                params.scale,
             ) catch |err| switch (err) {
                 error.Overflow, error.CanvasTooBig => {
                     std.log.err("drawing is too big", .{});
